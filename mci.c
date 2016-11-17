@@ -5,6 +5,9 @@
 #include <string.h>
 #include "diskio.h"
 
+
+
+
 /* --- MCI configurations --- */
 #define N_BUF		4			/* Block transfer FIFO depth (>= 2) */
 #define PCLK		72000000UL	/* PCLK supplied to MCI module */
@@ -237,13 +240,16 @@ static int send_cmd(UINT idx, DWORD arg, UINT rt, DWORD *buff) {
 	}
 	idx &= 0x3F; /* Mask out ACMD flag */
 
+	//
+
+	Timer[1] = 100;
 	do { /* Wait while CmdActive bit is set */
 		MCI_COMMAND = 0; /* Cancel to transmit command */
 		MCI_CLEAR = 0x3FF/*0x0C5*/; /* Clear status flags */
 		UINT s;
 		for (s = 0; s < 10; s++)
 			MCI_STATUS; /* Skip lock out time of command reg. */
-	}while (MCI_STATUS & 0x00800);
+	}while ((MCI_STATUS & 0x00800) && Timer[1]);
 
 	MCI_ARGUMENT = arg; /* Set the argument into argument register */
 	UINT mc = 0x400 | idx; /* Enable bit + index */
@@ -495,14 +501,19 @@ DRESULT MCI_read(BYTE *buff, DWORD sector, UINT count) {
 	MCI_DATA_CTRL = DataCtrl;
 	for (i = 0; i < 0x10; i++)
 		;
-	Timer[2] = 100;
+	Timer[3] = 100;
+
+
 
 	do {
-		while (MCI_Block_End_Flag && Timer[2]) { /* Wait for block arrival */
+
+
+		while (MCI_Block_End_Flag && Timer[3]) { /* Wait for block arrival */
 
 		}
 
-		if (!Timer[2]) {
+
+		if (!Timer[3]) {
 			MCI_RXDisable();
 			MCI_DATA_CTRL = 0;
 			MCI_CLEAR = 0x7FF;
@@ -511,7 +522,7 @@ DRESULT MCI_read(BYTE *buff, DWORD sector, UINT count) {
 
 		unsigned short ic;
 		for (ic = 0; ic < 512; ic++) {
-			buff[ic] = BufferBlock[ic];
+			 buff[ic] = BufferBlock[ic];
 		}
 
 		count--;

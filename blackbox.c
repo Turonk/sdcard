@@ -5,8 +5,8 @@
 #include "uart.h"
 #include "LPC24xx.h"
 #include "board.h"
+#include "string.h"
 #include "timer.h"
-#include "screens.h"
 
 static char* inttostr(unsigned int n, unsigned char len) {
 	static char buf[20];
@@ -52,20 +52,21 @@ int f_printf_result;
 DWORD fre_clust, fre_sect, tot_sect;
 
 unsigned short disk_file_count;
+extern DWORD uptime;
 
 char dateStr[] = "00000000.log";
-bool SD_in = false; //вставлена ли SD карта (прошли ли инициализация и первая запись на сд карту правильно)
-
-FIL fp;
+bool SD_in = false; 	//вставлена ли SD карта (прошли ли инициализация и первая запись на сд карту правильно)
+FRESULT f_getfree_result ;
+volatile char bufferRead[240];
+UINT ByteToRead;    	//Количество байт для чтения
+UINT fileByteRead;   	//Количество прочитанных байт
 FATFS fs;
 DIR dir;
-bool write_propusk;
 
 extern unsigned char initsteps;
 
 bool initBlackBox() {
 	setStatNoInit();
-	write_propusk = false;
 
 	fs.fs_type = 0;
 	disk_mount_result = f_mount(&fs, "", 1);
@@ -73,6 +74,7 @@ bool initBlackBox() {
 	if (disk_mount_result == FR_OK) {
 		initsteps = 20;
 
+       //пристваевает файлу название с датой
 		RTCTime Real_timer = RTCGetTime();
 		unsigned int rt_year = Real_timer.RTC_Year < 9999 ? (unsigned int) Real_timer.RTC_Year : 0;
 		unsigned int rt_mon = Real_timer.RTC_Mon < 13 ? (unsigned int) Real_timer.RTC_Mon : 0;
@@ -91,7 +93,7 @@ bool initBlackBox() {
 
 		//определяем свободное место на карте
 		FATFS *fs2 = &fs;
-		FRESULT f_getfree_result = f_getfree("", &fre_clust, &fs2);
+		f_getfree_result = f_getfree("", &fre_clust, &fs2);
 		if (f_getfree_result == FR_OK) {
 			tot_sect = (fs2->n_fatent - 2) * fs2->csize;
 			if (tot_sect < 1000) return 0;
@@ -110,6 +112,7 @@ bool initBlackBox() {
 				f_readdir_result = f_readdir(&dir, &fno);
 				disk_file_count++;
 			}while (fno.fname[0] && (f_readdir_result == FR_OK));
+			f_closedir(&dir);
 		}
 
 		//удаление половины файлов если карта заполнена на 4/5
@@ -126,6 +129,7 @@ bool initBlackBox() {
 						deleteCount--;
 					}
 				}while (fno.fname[0] && (f_readdir_result == FR_OK) && deleteCount);
+				f_closedir(&dir);
 			}
 		}
 
@@ -133,11 +137,10 @@ bool initBlackBox() {
 		FILINFO fno;
 		FRESULT f_stat_result;
 		f_stat_result = f_stat(dateStr, &fno);
+		FIL fp;
 		file_open_result = f_open(&fp, dateStr, FA_OPEN_ALWAYS | FA_WRITE);
 		if (file_open_result == FR_OK) {
-
 			initsteps = 40;
-
 			if (f_stat_result == FR_NO_FILE) {
 				disk_file_count++;
 				f_puts("# time;P_O2, atm;P_He, atm;Flow O2, l/min;Flow He, l/min;FiO2 Env, %;FiO2 sens2, %;P mask, cm H2O;Tmask, gradC;Tnagr, gradC;V, ml;f, 1/min;Tzad, gradC;FiO2 zad, %;Flags;\r\n", &fp);
@@ -146,65 +149,85 @@ bool initBlackBox() {
 			}
 			f_printf_result = f_printf(&fp, "# POWERON %02d.%02d.%04d %02d:%02d:%02d\r\n", rt_day, rt_mon, rt_year, rt_hour, rt_min, rt_sec);
 			f_sync(&fp);
+			f_close(&fp);
 		}
 	}
 
 	return ((disk_mount_result == FR_OK) && (file_open_result == FR_OK) && (f_printf_result > 0));
 }
 
-static DWORD uptime_prev;
-/*static unsigned char PvxO2_prev;
- static unsigned char PvxHe_prev;
- static unsigned short O2concEtalon_prev;
- static unsigned short O2concFast_prev;
- static unsigned char Pm_prev;
- static unsigned char Tf_prev;
- static unsigned char HeaterTemp_prev;
- static unsigned short V_prev;
- static unsigned char F_prev;
- static unsigned char Tzad_prev;
- static unsigned char O2zad_prev;
- static DWORD flags_prev;*/
+//чтение имени N-ого файла
+void readFileName(FILINFO* fno, unsigned short N){
+	DIR dir2;
+	FRESULT res = f_opendir(&dir2, "");
+	if (res != FR_OK) return;
+	unsigned short num = 0;
+	do {
+		res = f_readdir(&dir2, fno);
+		num++;
+	}while (num<=N && (res == FR_OK));
+	f_closedir(&dir2);
+}
 
+//чтение данных из файла
+void readLogFile(unsigned int fileReadDisloc, unsigned short fileReadNumberElements){
+	FRESULT res;
+	FILINFO fno;
+	FIL fileRead;
+	DIR dir2;
+	res = f_opendir(&dir2, "");
+	unsigned short num = 0;
+	if (res != FR_OK) return;
+	do {
+		res = f_readdir(&dir2, &fno);
+		num++;
+	}while (num<=fileReadNumberElements && (res == FR_OK));
+	f_closedir(&dir2);
+	res = f_open(&fileRead, fno.fname ,FA_OPEN_EXISTING|FA_READ);
+	if (res == FR_OK){
+		res = f_lseek(&fileRead, fileReadDisloc);
+		ByteToRead=240;
+		res = f_read(&fileRead, bufferRead, ByteToRead, &fileByteRead);
+		if (res!=FR_OK) fileByteRead = 0;
+	}
+	f_close(&fileRead);
+}
 
+DWORD flags_prev = 0;
+unsigned char saveDataToBlackBoxCallCount = 0;
+
+extern DWORD uptime;
+extern TRxData RxData;
+extern unsigned short data[8];
+extern short poprArray[2][10];
+
+//запись лога на карту памяти
 FRESULT saveDataToBlackBox() {
 	FRESULT res = FR_DISK_ERR;
-	BYTE byte_info_2 = (Dev_st==dev_work) | ((data[5]>0)<<1) | ((st_KEY2==0)<<2) | ((timeUART3WaitPacket>=5)<<3);
+	if (disk_mount_result == FR_OK && fre_sect > 10000) {
+		BYTE byte_info_2 = getByte_info_2();
+		DWORD flags = (DWORD) poprArray[0][4] << 24 | (DWORD) byte_info_2 << 16 |
+				(DWORD) RxData.byte_info << 8 | (DWORD) RxData.byte_alarms;
+		saveDataToBlackBoxCallCount++;
+		if ((Dev_st == dev_work) || (flags != flags_prev) || (saveDataToBlackBoxCallCount>60)){
+			flags_prev = flags;
+			saveDataToBlackBoxCallCount = 0;
 
-	DWORD flags = (DWORD) poprArray[0][4] << 24 | (DWORD) byte_info_2 << 16 | (DWORD) RxData.alarmsFromBU;
-	if (disk_mount_result == FR_OK && file_open_result == FR_OK && fre_sect > 10000) {
-		/*if (RxData.PvxO2!=PvxO2_prev || RxData.PvxHe!=PvxHe_prev || RxData.O2concEtalon!=O2concEtalon_prev || RxData.O2concFast!=O2concFast_prev ||
-		 RxData.Pm!=Pm_prev || RxData.Tf!=Tf_prev || RxData.HeaterTemp!=HeaterTemp_prev || RxData.V!=V_prev || RxData.F!=F_prev ||
-		 data[5]!=Tzad_prev || data[4]!=O2zad_prev || flags!=flags_prev){
-		 */
-		/*if (write_propusk){
-		 res = f_printf(&fp, "%ld;%d;%d;%d;%d;%d;%d;%d;%d;%d;%d;%d;%ld\r\n", uptime_prev, PvxO2_prev, PvxHe_prev, O2concEtalon_prev,
-		 O2concFast_prev, Pm_prev, Tf_prev, HeaterTemp_prev, V_prev, F_prev, Tzad_prev, O2zad_prev, flags);
-		 write_propusk = false;
-		 }*/
+			FIL fp;
+			file_open_result = f_open(&fp, dateStr, FA_OPEN_ALWAYS | FA_WRITE);
+			if (file_open_result == FR_OK){
 
-		res = f_printf(&fp, "%d;%d;%d;%d;%d;%d;%d;%d;%d;%d;%d;%d;%d;%d;%ld\r\n", uptime / 1000, RxData.PvxO2, RxData.PvxHe,
-				RxData.O2flow, RxData.Heflow, RxData.O2concEtalon, RxData.O2concFast, RxData.Pm, RxData.Tf, RxData.HeaterTemp,
-				RxData.V, RxData.F, data[1], data[0], flags);
 
-		//(DWORD)capnoGetSet()<<24 | capnoState<<16 | capnoConfig<<8 | capnoErrors, capnoFiCO2, capnoEtCO2, capnoRR
-
-		f_sync(&fp);
-
-		/*	PvxO2_prev = RxData.PvxO2;
-		 PvxHe_prev = RxData.PvxHe;
-		 O2concEtalon_prev = RxData.O2concEtalon;
-		 O2concFast_prev = RxData.O2concFast;
-		 Pm_prev = RxData.Pm;
-		 Tf_prev = RxData.Tf;
-		 HeaterTemp_prev = RxData.HeaterTemp;
-		 V_prev = RxData.V;
-		 F_prev = RxData.F;
-		 Tzad_prev = data[5];
-		 O2zad_prev = data[4];
-		 flags_prev = flags;
-		 }else write_propusk = true;*/
+				res = f_lseek(&fp, f_size(&fp));
+				if (res == FR_OK){
+					res = f_printf(&fp, "%d;%d;%d;%d;%d;%d;%d;%d;%d;%d;%d;%d;%d;%d;%ld\r\n", uptime / 1000, RxData.PvxO2,
+							RxData.PvxHe, RxData.O2flow, RxData.Heflow, RxData.O2concEtalon, RxData.O2concFast, RxData.Pm,
+							RxData.Tf, RxData.HeaterTemp, RxData.V, RxData.F, data[5], data[4], flags);
+				}
+				f_sync(&fp);
+				f_close(&fp);
+			}
+		}
 	}
-	uptime_prev = uptime;
 	return res;
 }
